@@ -24,10 +24,23 @@ function saveToStorage(key, value) {
   }
 }
 
+// Mock warehouses for initial data
+const MOCK_WAREHOUSES = [
+  { id: '1', name: 'Main Warehouse', shortCode: 'WH-MAIN', address: '123 Industrial Park, City Center', createdAt: new Date().toISOString() },
+  { id: '2', name: 'Secondary Warehouse', shortCode: 'WH-SEC', address: '456 Commerce Street, Downtown', createdAt: new Date().toISOString() },
+  { id: '3', name: 'Distribution Center', shortCode: 'WH-DC', address: '789 Logistics Avenue, Port Area', createdAt: new Date().toISOString() },
+];
+
 export function AppProvider({ children }) {
   const [products, setProducts] = useState([]);
   const [receipts, setReceipts] = useState([]);
   const [deliveries, setDeliveries] = useState([]);
+  const [warehouses, setWarehouses] = useState(() => {
+    const stored = loadFromStorage('stockmaster_warehouses', []);
+    // If no warehouses in storage, use mock data
+    return stored.length > 0 ? stored : MOCK_WAREHOUSES;
+  });
+  const [locations, setLocations] = useState(() => loadFromStorage('stockmaster_locations', []));
   
   // Load user from localStorage (from auth token)
   const [user, setUser] = useState(() => {
@@ -79,6 +92,15 @@ export function AppProvider({ children }) {
       localStorage.removeItem('user');
     }
   }, [user]);
+
+  // Sync warehouses and locations to localStorage
+  useEffect(() => {
+    saveToStorage('stockmaster_warehouses', warehouses);
+  }, [warehouses]);
+
+  useEffect(() => {
+    saveToStorage('stockmaster_locations', locations);
+  }, [locations]);
 
   // Helper function to determine product status
   function getProductStatus(stock, reorderLevel) {
@@ -334,10 +356,62 @@ export function AppProvider({ children }) {
     };
   };
 
+  // Warehouse operations
+  const addWarehouse = (warehouse) => {
+    const newWarehouse = {
+      id: Date.now().toString(),
+      name: warehouse.name,
+      shortCode: warehouse.shortCode,
+      address: warehouse.address,
+      createdAt: new Date().toISOString(),
+    };
+    setWarehouses([...warehouses, newWarehouse]);
+    showToast('Warehouse saved successfully', 'success');
+    return newWarehouse;
+  };
+
+  const updateWarehouse = (id, updates) => {
+    setWarehouses(warehouses.map(w => w.id === id ? { ...w, ...updates } : w));
+    showToast('Warehouse updated successfully', 'success');
+  };
+
+  const deleteWarehouse = (id) => {
+    setWarehouses(warehouses.filter(w => w.id !== id));
+    // Also remove locations associated with this warehouse
+    setLocations(locations.filter(l => l.warehouseId !== id));
+    showToast('Warehouse deleted successfully', 'success');
+  };
+
+  // Location operations
+  const addLocation = (location) => {
+    const newLocation = {
+      id: Date.now().toString(),
+      name: location.name,
+      shortCode: location.shortCode,
+      warehouseId: location.warehouseId,
+      createdAt: new Date().toISOString(),
+    };
+    setLocations([...locations, newLocation]);
+    showToast('Location saved successfully', 'success');
+    return newLocation;
+  };
+
+  const updateLocation = (id, updates) => {
+    setLocations(locations.map(l => l.id === id ? { ...l, ...updates } : l));
+    showToast('Location updated successfully', 'success');
+  };
+
+  const deleteLocation = (id) => {
+    setLocations(locations.filter(l => l.id !== id));
+    showToast('Location deleted successfully', 'success');
+  };
+
   const value = {
     products,
     receipts,
     deliveries,
+    warehouses,
+    locations,
     user,
     toast,
     loading,
@@ -352,6 +426,12 @@ export function AppProvider({ children }) {
     addDelivery,
     updateDelivery,
     deleteDelivery,
+    addWarehouse,
+    updateWarehouse,
+    deleteWarehouse,
+    addLocation,
+    updateLocation,
+    deleteLocation,
     login,
     logout,
     showToast,

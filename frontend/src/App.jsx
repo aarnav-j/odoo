@@ -10,6 +10,8 @@ import Stock from './pages/Stock';
 import Operations from './pages/Operations';
 import MoveHistory from './pages/MoveHistory';
 import Settings from './pages/Settings';
+import Warehouse from './pages/Warehouse';
+import Location from './pages/Location';
 import Receipts from './pages/Receipts';
 import ReceiptsList from './pages/ReceiptsList';
 import ReceiptDetail from './pages/ReceiptDetail';
@@ -100,6 +102,22 @@ function AppRoutes() {
           element={
             <ProtectedRoute>
               <Settings />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings/warehouse"
+          element={
+            <ProtectedRoute>
+              <Warehouse />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/settings/location"
+          element={
+            <ProtectedRoute>
+              <Location />
             </ProtectedRoute>
           }
         />
