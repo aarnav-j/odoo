@@ -1,12 +1,16 @@
 import { useState, useRef, useEffect } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Package, Download, Upload, User, LogOut, UserCircle, Menu, X, Settings, ChevronDown, Warehouse, MapPin } from 'lucide-react';
+import { LayoutDashboard, Package, Download, Upload, User, LogOut, UserCircle, Menu, X, Settings, ChevronDown, Warehouse, MapPin, ArrowRightLeft, FileText } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useNavigate } from 'react-router-dom';
 
 const navItems = [
   { path: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-  { path: '/products', label: 'Products', icon: Package },
+  { path: '/products', label: 'Stock', icon: Package },
+  { path: '/move-history', label: 'Move History', icon: ArrowRightLeft },
+];
+
+const operationsItems = [
   { path: '/receipts', label: 'Receipts', icon: Download },
   { path: '/deliveries', label: 'Deliveries', icon: Upload },
 ];
@@ -19,13 +23,17 @@ const settingsItems = [
 export default function TopNav() {
   const [isOpen, setIsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isOperationsOpen, setIsOperationsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const dropdownRef = useRef(null);
+  const operationsRef = useRef(null);
   const settingsRef = useRef(null);
   const location = useLocation();
   const { user, logout } = useApp();
   const navigate = useNavigate();
 
+  // Check if current route is an operations route
+  const isOperationsActive = location.pathname.startsWith('/receipts') || location.pathname.startsWith('/deliveries');
   // Check if current route is a settings route
   const isSettingsActive = location.pathname.startsWith('/settings');
 
@@ -33,6 +41,9 @@ export default function TopNav() {
     function handleClickOutside(event) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
         setIsOpen(false);
+      }
+      if (operationsRef.current && !operationsRef.current.contains(event.target)) {
+        setIsOperationsOpen(false);
       }
       if (settingsRef.current && !settingsRef.current.contains(event.target)) {
         setIsSettingsOpen(false);
@@ -54,9 +65,7 @@ export default function TopNav() {
         {/* Logo and Brand */}
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 grid place-items-center rounded-md bg-gradient-to-br from-indigo-500 to-violet-500 text-white text-sm font-medium tracking-tight">
-              SM
-            </div>
+            <img src="/logo-2.jpg" alt="StockMaster Logo" className="h-8 w-8 object-contain rounded" />
             <span className="text-base font-semibold tracking-tight text-slate-100 hidden sm:inline">StockMaster</span>
           </div>
 
@@ -81,6 +90,56 @@ export default function TopNav() {
                 </NavLink>
               );
             })}
+            
+            {/* Operations Dropdown */}
+            <div 
+              className="relative" 
+              ref={operationsRef}
+              onMouseEnter={() => setIsOperationsOpen(true)}
+              onMouseLeave={() => setIsOperationsOpen(false)}
+            >
+              <button
+                onClick={() => setIsOperationsOpen(!isOperationsOpen)}
+                className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                  isOperationsActive
+                    ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                    : 'text-slate-300 hover:bg-white/5 hover:text-slate-100'
+                }`}
+              >
+                <FileText className="h-4 w-4" />
+                Operations
+                <ChevronDown className={`h-3 w-3 transition-transform ${isOperationsOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {/* Dropdown Menu */}
+              {isOperationsOpen && (
+                <div
+                  className="absolute left-0 mt-0 w-48 rounded-lg border border-white/10 bg-slate-900 shadow-lg z-50"
+                >
+                  <div className="p-1">
+                    {operationsItems.map((item) => {
+                      const Icon = item.icon;
+                      const isActive = location.pathname === item.path || location.pathname.startsWith(`${item.path}/`);
+                      return (
+                        <NavLink
+                          key={item.path}
+                          to={item.path}
+                          onClick={() => setIsOperationsOpen(false)}
+                          className={`flex items-center gap-2 w-full rounded-md px-3 py-2 text-sm transition-colors ${
+                            isActive
+                              ? 'bg-indigo-500/20 text-indigo-300'
+                              : 'text-slate-300 hover:bg-white/5 hover:text-slate-100'
+                          }`}
+                        >
+                          <Icon className="h-4 w-4" />
+                          {item.label}
+                        </NavLink>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
             
             {/* Settings Dropdown */}
             <div 
@@ -205,6 +264,33 @@ export default function TopNav() {
                 </NavLink>
               );
             })}
+            
+            {/* Operations in Mobile Menu */}
+            <div className="pt-2 border-t border-white/10 mt-2">
+              <div className="px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                Operations
+              </div>
+              {operationsItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = location.pathname === item.path || location.pathname.startsWith(`${item.path}/`);
+                return (
+                  <NavLink
+                    key={item.path}
+                    to={item.path}
+                    onClick={() => setMobileMenuOpen(false)}
+                    className={`flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors ${
+                      isActive
+                        ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                        : 'text-slate-300 hover:bg-white/5 hover:text-slate-100'
+                    }`}
+                  >
+                    <Icon className="h-5 w-5" />
+                    {item.label}
+                  </NavLink>
+                );
+              })}
+            </div>
+            
             
             {/* Settings in Mobile Menu */}
             <div className="pt-2 border-t border-white/10 mt-2">

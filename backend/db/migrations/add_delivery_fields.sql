@@ -52,3 +52,4 @@ CREATE INDEX IF NOT EXISTS idx_stock_moves_status ON stock_moves(status);
 CREATE TRIGGER update_stock_moves_updated_at BEFORE UPDATE ON stock_moves
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
+

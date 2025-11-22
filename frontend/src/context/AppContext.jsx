@@ -42,8 +42,14 @@ export function AppProvider({ children }) {
   });
   const [locations, setLocations] = useState(() => loadFromStorage('stockmaster_locations', []));
   
-  // Load user from localStorage (from auth token)
+  // Load user from localStorage (from auth token) - only if token exists
   const [user, setUser] = useState(() => {
+    const token = localStorage.getItem('token');
+    // Only load user if token exists (token validation will happen immediately on mount)
+    if (!token) {
+      return null;
+    }
+    
     const storedUser = localStorage.getItem('user');
     if (storedUser) {
       try {
@@ -52,34 +58,87 @@ export function AppProvider({ children }) {
         return null;
       }
     }
-    return loadFromStorage(STORAGE_KEYS.USER, null);
+    const stockmasterUser = loadFromStorage(STORAGE_KEYS.USER, null);
+    return stockmasterUser;
   });
   
   const [toast, setToast] = useState(null);
   const [loading, setLoading] = useState(true);
+
+  // Listen for auth logout events (from API interceptor)
+  useEffect(() => {
+    const handleAuthLogout = () => {
+      setUser(null);
+    };
+    
+    window.addEventListener('auth:logout', handleAuthLogout);
+    return () => {
+      window.removeEventListener('auth:logout', handleAuthLogout);
+    };
+  }, []);
+
+  // Validate token immediately on mount if user exists
+  useEffect(() => {
+    async function validateToken() {
+      const token = localStorage.getItem('token');
+      // If no token but user exists, clear user
+      if (!token) {
+        if (user) {
+          setUser(null);
+        }
+        return;
+      }
+      
+      // If user exists, validate token with a quick API call
+      if (user) {
+        try {
+          // Use a lightweight endpoint to validate token
+          await api.fetchProducts();
+          // Token is valid - user stays logged in
+        } catch (error) {
+          // If 401, token is invalid - clear user immediately
+          if (error.response?.status === 401) {
+            // The interceptor already cleared localStorage
+            setUser(null);
+          }
+        }
+      }
+    }
+    
+    validateToken();
+  }, []); // Only run on mount
 
   // Fetch data from API on mount
   useEffect(() => {
     async function fetchData() {
       try {
         setLoading(true);
-        const [productsData, receiptsData, deliveriesData] = await Promise.all([
+        const [productsData, receiptsData, deliveriesData, locationsData, warehousesData] = await Promise.all([
           api.fetchProducts().catch(() => []),
           api.fetchReceipts().catch(() => []),
           api.fetchDeliveries().catch(() => ({ deliveries: [], total: 0, page: 1 })),
+          api.fetchLocations().catch(() => []),
+          api.fetchWarehouses().catch(() => []),
         ]);
-        
+
         setProducts(productsData);
         setReceipts(receiptsData);
         setDeliveries(Array.isArray(deliveriesData) ? deliveriesData : (deliveriesData.deliveries || []));
+
+        // Update locations and warehouses
+        if (locationsData && locationsData.length > 0) {
+          setLocations(locationsData);
+        }
+        if (warehousesData && warehousesData.length > 0) {
+          setWarehouses(warehousesData);
+        }
       } catch (error) {
         console.error('Error fetching data:', error);
-        showToast('Failed to load data from server', 'error');
       } finally {
         setLoading(false);
       }
     }
-    
+
     fetchData();
   }, []);
 
@@ -359,6 +418,7 @@ export function AppProvider({ children }) {
   const logout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    localStorage.removeItem(STORAGE_KEYS.USER);
     setUser(null);
     showToast('Logged out successfully', 'success');
   };
@@ -472,6 +532,7 @@ export function AppProvider({ children }) {
     showToast,
     closeToast,
     getDashboardKPIs,
+    refreshProducts,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

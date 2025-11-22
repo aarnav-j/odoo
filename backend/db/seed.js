@@ -36,7 +36,45 @@ export async function seedDatabase() {
         ['Main Warehouse']
       );
       const warehouseId = warehouseResult.rows[0]?.id;
-      
+
+      // 2.5 Create default locations if they don't exist
+      let mainStorageId, productionRackId;
+      if (warehouseId) {
+        const locationsToCreate = [
+          { name: 'Main Storage', warehouse_id: warehouseId },
+          { name: 'Production Rack', warehouse_id: warehouseId },
+          { name: 'Shipping Area', warehouse_id: warehouseId },
+        ];
+
+        for (const location of locationsToCreate) {
+          // First check if location exists
+          const checkResult = await client.query(
+            `SELECT id FROM locations WHERE name = $1 AND warehouse_id = $2`,
+            [location.name, location.warehouse_id]
+          );
+
+          let locId;
+          if (checkResult.rows.length > 0) {
+            locId = checkResult.rows[0].id;
+          } else {
+            const locResult = await client.query(
+              `INSERT INTO locations (name, warehouse_id)
+               VALUES ($1, $2)
+               RETURNING id`,
+              [location.name, location.warehouse_id]
+            );
+            locId = locResult.rows[0].id;
+          }
+
+          if (location.name === 'Main Storage') {
+            mainStorageId = locId;
+          } else if (location.name === 'Production Rack') {
+            productionRackId = locId;
+          }
+        }
+        console.log('  ✅ Created default locations');
+      }
+
       // 3. Insert products
       const products = [
         { name: 'Steel Rods', sku: 'STL-001', category: 'Raw Materials', uom: 'kg', stock: 1250, reorderLevel: 200 },
@@ -246,6 +284,100 @@ export async function seedDatabase() {
       }
       console.log(`  ✅ Created ${deliveries.length} deliveries`);
       
+      // 6. Create stock ledger entries for move history
+      console.log('  Creating stock ledger entries for move history...');
+      
+      // Get all receipts and deliveries to create ledger entries
+      const allReceiptsForLedger = await client.query(
+        `SELECT r.id, r.receipt_id, r.supplier, r.warehouse_id, r.location_id, r.date
+         FROM receipts r
+         ORDER BY r.date DESC, r.id
+         LIMIT 30`
+      );
+      
+      const allDeliveriesForLedger = await client.query(
+        `SELECT d.id, d.reference, d.contact, d.warehouse_id, d.from_location_id, d.date
+         FROM deliveries d
+         ORDER BY d.date DESC, d.id
+         LIMIT 20`
+      );
+      
+      // Track stock per product for accurate balance calculations
+      const productStockTracker = {};
+      for (const product of products) {
+        const productId = productIds[products.indexOf(product)];
+        productStockTracker[productId] = 0; // Start from 0, will increase with receipts
+      }
+      
+      let ledgerEntryCount = 0;
+      
+      // Create receipt entries (IN moves) - simulate chronologically
+      console.log(`    Processing ${allReceiptsForLedger.rows.length} receipts for ledger entries...`);
+      for (const receipt of allReceiptsForLedger.rows) {
+        const receiptItems = await client.query(
+          'SELECT product_id, quantity FROM receipt_items WHERE receipt_id = $1',
+          [receipt.id]
+        );
+        
+        for (const item of receiptItems.rows) {
+          const productId = item.product_id;
+          const quantity = parseFloat(item.quantity);
+          const balanceBefore = productStockTracker[productId] || 0;
+          productStockTracker[productId] = (productStockTracker[productId] || 0) + quantity;
+          const balanceAfter = productStockTracker[productId];
+          
+          // Create ledger entry for receipt (IN move)
+          await client.query(
+            `INSERT INTO stock_ledger (
+              product_id, warehouse_id, location_id, transaction_type,
+              reference_id, reference_type, quantity, balance_before, balance_after, created_by, created_at
+            )
+            VALUES ($1, $2, $3, 'receipt', $4, 'receipt', $5, $6, $7, $8, $9)`,
+            [productId, receipt.warehouse_id, receipt.location_id,
+             receipt.id, quantity, balanceBefore, balanceAfter, userId, receipt.date]
+          );
+          ledgerEntryCount++;
+        }
+      }
+      
+      // Create delivery entries (OUT moves) - simulate chronologically after some receipts
+      console.log(`    Processing ${allDeliveriesForLedger.rows.length} deliveries for ledger entries...`);
+      for (const delivery of allDeliveriesForLedger.rows) {
+        const deliveryItems = await client.query(
+          'SELECT product_id, quantity FROM delivery_items WHERE delivery_id = $1',
+          [delivery.id]
+        );
+        
+        for (const item of deliveryItems.rows) {
+          const productId = item.product_id;
+          const quantity = parseFloat(item.quantity);
+          const currentStock = productStockTracker[productId] || 0;
+          
+          // Create delivery entry (even if stock is low, for demo purposes)
+          const balanceBefore = Math.max(currentStock, quantity); // Ensure we have enough for the entry
+          productStockTracker[productId] = Math.max(0, currentStock - quantity);
+          const balanceAfter = productStockTracker[productId];
+          
+          // Create ledger entry for delivery (OUT move)
+          await client.query(
+            `INSERT INTO stock_ledger (
+              product_id, warehouse_id, location_id, transaction_type,
+              reference_id, reference_type, quantity, balance_before, balance_after, created_by, created_at
+            )
+            VALUES ($1, $2, $3, 'delivery', $4, 'delivery', $5, $6, $7, $8, $9)`,
+            [productId, delivery.warehouse_id, delivery.from_location_id,
+             delivery.id, -quantity, balanceBefore, balanceAfter, userId, delivery.date]
+          );
+          ledgerEntryCount++;
+        }
+      }
+      
+      console.log(`  ✅ Created ${ledgerEntryCount} stock ledger entries`);
+      
+      // Verify ledger entries were created
+      const ledgerCount = await client.query('SELECT COUNT(*) as count FROM stock_ledger');
+      console.log(`  📊 Total ledger entries in database: ${ledgerCount.rows[0].count}`);
+      
       await client.query('COMMIT');
       console.log('✅ Database seeded successfully!');
       
@@ -263,11 +395,18 @@ export async function seedDatabase() {
 }
 
 // Run if called directly
-if (import.meta.url === `file://${process.argv[1]}`) {
+const filePath = import.meta.url.replace('file:///', '').replace(/\\/g, '/');
+const scriptPath = process.argv[1]?.replace(/\\/g, '/') || '';
+const isMainModule = filePath.includes('seed.js') && (scriptPath.includes('seed.js') || process.argv.length > 1);
+
+if (isMainModule) {
   seedDatabase()
-    .then(() => process.exit(0))
+    .then(() => {
+      console.log('\n✅ Seed completed successfully!');
+      process.exit(0);
+    })
     .catch((error) => {
-      console.error(error);
+      console.error('\n❌ Seed failed:', error);
       process.exit(1);
     });
 }

@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
   email VARCHAR(255) UNIQUE NOT NULL,
   password_hash VARCHAR(255),
   is_verified BOOLEAN DEFAULT FALSE,
+  role VARCHAR(50) DEFAULT 'warehouse_staff',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -17,6 +18,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- Index for email lookups
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_is_verified ON users(is_verified);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
 
 -- ============================================
 -- EMAIL OTPS TABLE

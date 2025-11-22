@@ -7,9 +7,7 @@ export default function Header() {
       <div className="mx-auto max-w-7xl px-6 py-5">
         <div className="flex items-center justify-between">
           <Link to="/" className="flex items-center gap-3">
-            <div className="h-8 w-8 grid place-items-center rounded-md bg-gradient-to-br from-indigo-500 to-violet-500 text-white text-sm font-medium tracking-tight">
-              SM
-            </div>
+            <img src="/logo-2.jpg" alt="StockMaster Logo" className="h-8 w-8 object-contain rounded" />
             <span className="text-base font-semibold tracking-tight text-slate-100">StockMaster</span>
           </Link>
           <nav className="hidden md:flex items-center gap-8">

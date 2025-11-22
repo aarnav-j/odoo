@@ -1,12 +1,11 @@
 export default function StatusStepper({ currentStatus }) {
   const steps = [
     { key: 'draft', label: 'Draft' },
-    { key: 'waiting', label: 'Waiting' },
-    { key: 'ready', label: 'Ready' },
-    { key: 'done', label: 'Done' }
+    { key: 'in_transit', label: 'In Transit' },
+    { key: 'completed', label: 'Completed' }
   ];
   
-  const statusOrder = ['draft', 'waiting', 'ready', 'done'];
+  const statusOrder = ['draft', 'in_transit', 'completed'];
   const currentIndex = statusOrder.indexOf(currentStatus);
   
   return (
@@ -54,5 +53,4 @@ export default function StatusStepper({ currentStatus }) {
     </div>
   );
 }
-
 

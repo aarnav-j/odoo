@@ -106,6 +106,38 @@ router.delete('/products/:id', async (req, res) => {
 });
 
 // ============================================
+// LOCATIONS API
+// ============================================
+router.get('/locations', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT l.id, l.name, l.warehouse_id as "warehouseId", w.name as "warehouseName"
+      FROM locations l
+      LEFT JOIN warehouses w ON w.id = l.warehouse_id
+      ORDER BY w.name, l.name
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching locations:', error);
+    res.status(500).json({ error: 'Failed to fetch locations', message: error.message });
+  }
+});
+
+router.get('/warehouses', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT id, name, address
+      FROM warehouses
+      ORDER BY name
+    `);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching warehouses:', error);
+    res.status(500).json({ error: 'Failed to fetch warehouses', message: error.message });
+  }
+});
+
+// ============================================
 // RECEIPTS API
 // ============================================
 router.get('/receipts', async (req, res) => {
@@ -280,11 +312,42 @@ router.post('/receipts/:id/validate', async (req, res) => {
         [id]
       );
       
-      // Update product stock
+      // Update product stock and create ledger entries
       for (const item of itemsResult.rows) {
+        // Get current stock before update
+        const productResult = await client.query('SELECT stock FROM products WHERE id = $1', [item.product_id]);
+        const balanceBefore = parseFloat(productResult.rows[0].stock || 0);
+        
+        // Update product stock
         await client.query(
           'UPDATE products SET stock = stock + $1 WHERE id = $2',
           [item.quantity, item.product_id]
+        );
+        
+        // Get balance after update
+        const productResultAfter = await client.query('SELECT stock FROM products WHERE id = $1', [item.product_id]);
+        const balanceAfter = parseFloat(productResultAfter.rows[0].stock || 0);
+        
+        // Update stock_levels if location exists
+        if (receipt.location_id) {
+          await client.query(
+            `INSERT INTO stock_levels (product_id, warehouse_id, location_id, quantity)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (product_id, warehouse_id, location_id)
+             DO UPDATE SET quantity = stock_levels.quantity + $4`,
+            [item.product_id, receipt.warehouse_id, receipt.location_id, item.quantity]
+          );
+        }
+        
+        // Create stock ledger entry
+        await client.query(
+          `INSERT INTO stock_ledger (
+            product_id, warehouse_id, location_id, transaction_type,
+            reference_id, reference_type, quantity, balance_before, balance_after
+          )
+          VALUES ($1, $2, $3, 'receipt', $4, 'receipt', $5, $6, $7)`,
+          [item.product_id, receipt.warehouse_id, receipt.location_id,
+           id, item.quantity, balanceBefore, balanceAfter]
         );
       }
       
@@ -331,22 +394,29 @@ function generateDeliveryReference(count) {
   return `WH/OUT/${String(count).padStart(4, '0')}`;
 }
 
+function generateTransferReference(count) {
+  return `TRF-${String(count).padStart(3, '0')}`;
+}
+
 // Helper function to get available stock for a product at a location
 async function getAvailableStock(client, productId, locationId) {
   // Get stock from stock_levels or products table
   let stockResult;
-  if (locationId) {
+  const parsedProductId = parseInt(productId);
+  const parsedLocationId = locationId ? parseInt(locationId) : null;
+
+  if (parsedLocationId) {
     stockResult = await client.query(
       `SELECT COALESCE(sl.quantity, p.stock, 0) as quantity
        FROM products p
        LEFT JOIN stock_levels sl ON sl.product_id = p.id AND sl.location_id = $2
        WHERE p.id = $1`,
-      [productId, locationId]
+      [parsedProductId, parsedLocationId]
     );
   } else {
     stockResult = await client.query(
       'SELECT COALESCE(stock, 0) as quantity FROM products WHERE id = $1',
-      [productId]
+      [parsedProductId]
     );
   }
   
@@ -363,8 +433,20 @@ async function getAvailableStock(client, productId, locationId) {
     [productId, locationId]
   );
   
+  // Get reserved stock from transfers in transit
+  const transferReservedResult = await client.query(
+    `SELECT COALESCE(SUM(ti.quantity), 0) as reserved
+     FROM transfer_items ti
+     JOIN transfers t ON t.id = ti.transfer_id
+     WHERE ti.product_id = $1 
+       AND t.status = 'in_transit'
+       AND ($2 IS NULL OR t.from_location_id = $2)`,
+    [productId, locationId]
+  );
+  
   const reserved = parseFloat(reservedResult.rows[0]?.reserved || 0);
-  return stock - reserved;
+  const transferReserved = parseFloat(transferReservedResult.rows[0]?.reserved || 0);
+  return stock - reserved - transferReserved;
 }
 
 // GET /api/deliveries - Fetch all deliveries with pagination and filters
@@ -1147,6 +1229,915 @@ router.get('/products/available-stock', async (req, res) => {
   } catch (error) {
     console.error('Error fetching available stock:', error);
     res.status(500).json({ error: 'Failed to fetch available stock', message: error.message });
+  }
+});
+
+// ============================================
+// TRANSFERS API
+// ============================================
+
+// GET /api/transfers - Fetch all transfers with pagination and filters
+router.get('/transfers', async (req, res) => {
+  try {
+    const { status, from_date, to_date, search, page = 1, limit = 20, sort_by = 'date', sort_order = 'desc' } = req.query;
+    const offset = (page - 1) * limit;
+    
+    // Validate sort_by to prevent SQL injection
+    const validSortFields = {
+      'date': 't.date',
+      'transfer_id': 't.transfer_id',
+      'status': 't.status',
+      'created_at': 't.created_at'
+    };
+    
+    const sortField = validSortFields[sort_by] || 't.date';
+    const sortDirection = sort_order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    
+    let query = `
+      SELECT t.id, t.transfer_id as "transferId", t.date::text as date,
+             t.status, t.notes,
+             fw.name as "fromWarehouse", tw.name as "toWarehouse",
+             fl.name as "fromLocation", tl.name as "toLocation",
+             t.from_warehouse_id as "fromWarehouseId", t.to_warehouse_id as "toWarehouseId",
+             t.from_location_id as "fromLocationId", t.to_location_id as "toLocationId",
+             COALESCE((SELECT COUNT(*) FROM transfer_items ti WHERE ti.transfer_id = t.id), 0) as "totalItems"
+      FROM transfers t
+      LEFT JOIN warehouses fw ON fw.id = t.from_warehouse_id
+      LEFT JOIN warehouses tw ON tw.id = t.to_warehouse_id
+      LEFT JOIN locations fl ON fl.id = t.from_location_id
+      LEFT JOIN locations tl ON tl.id = t.to_location_id
+      WHERE 1=1
+    `;
+    const params = [];
+    let paramCount = 0;
+    
+    if (status) {
+      paramCount++;
+      query += ` AND t.status = $${paramCount}`;
+      params.push(status);
+    }
+    
+    if (from_date) {
+      paramCount++;
+      query += ` AND t.date >= $${paramCount}`;
+      params.push(from_date);
+    }
+    
+    if (to_date) {
+      paramCount++;
+      query += ` AND t.date <= $${paramCount}`;
+      params.push(to_date);
+    }
+    
+    if (search) {
+      paramCount++;
+      query += ` AND (t.transfer_id ILIKE $${paramCount} OR t.notes ILIKE $${paramCount} OR fw.name ILIKE $${paramCount} OR tw.name ILIKE $${paramCount} OR fl.name ILIKE $${paramCount} OR tl.name ILIKE $${paramCount})`;
+      params.push(`%${search}%`);
+    }
+    
+    query += ` ORDER BY ${sortField} ${sortDirection}, t.created_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    params.push(limit, offset);
+    
+    const transfersResult = await pool.query(query, params);
+    
+    // Get total count
+    let countQuery = 'SELECT COUNT(*) as total FROM transfers t WHERE 1=1';
+    const countParams = [];
+    let countParamCount = 0;
+    
+    if (status) {
+      countParamCount++;
+      countQuery += ` AND t.status = $${countParamCount}`;
+      countParams.push(status);
+    }
+    if (from_date) {
+      countParamCount++;
+      countQuery += ` AND t.date >= $${countParamCount}`;
+      countParams.push(from_date);
+    }
+    if (to_date) {
+      countParamCount++;
+      countQuery += ` AND t.date <= $${countParamCount}`;
+      countParams.push(to_date);
+    }
+    if (search) {
+      countParamCount++;
+      countQuery += ` AND (t.transfer_id ILIKE $${countParamCount} OR t.notes ILIKE $${countParamCount} OR EXISTS (SELECT 1 FROM warehouses w WHERE w.id = t.from_warehouse_id AND w.name ILIKE $${countParamCount}) OR EXISTS (SELECT 1 FROM warehouses w WHERE w.id = t.to_warehouse_id AND w.name ILIKE $${countParamCount}) OR EXISTS (SELECT 1 FROM locations l WHERE l.id = t.from_location_id AND l.name ILIKE $${countParamCount}) OR EXISTS (SELECT 1 FROM locations l WHERE l.id = t.to_location_id AND l.name ILIKE $${countParamCount}))`;
+      countParams.push(`%${search}%`);
+    }
+    
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].total);
+    
+    // Get items for each transfer
+    const transfers = await Promise.all(transfersResult.rows.map(async (transfer) => {
+      const itemsResult = await pool.query(
+        `SELECT ti.id, ti.product_id as "productId", ti.quantity,
+                p.name as "productName", p.sku, p.uom
+         FROM transfer_items ti
+         JOIN products p ON p.id = ti.product_id
+         WHERE ti.transfer_id = $1`,
+        [transfer.id]
+      );
+      return {
+        ...transfer,
+        items: itemsResult.rows,
+        totalItems: parseInt(transfer.totalItems) || 0,
+        date: transfer.date?.split('T')[0] || transfer.date
+      };
+    }));
+    
+    res.json({
+      transfers,
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+  } catch (error) {
+    console.error('Error fetching transfers:', error);
+    res.status(500).json({ error: 'Failed to fetch transfers', message: error.message });
+  }
+});
+
+// GET /api/transfers/:id - Fetch single transfer with all line items
+router.get('/transfers/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const transferResult = await pool.query(
+      `SELECT t.*, 
+              fw.name as "fromWarehouse", tw.name as "toWarehouse",
+              fl.name as "fromLocation", tl.name as "toLocation"
+       FROM transfers t
+       LEFT JOIN warehouses fw ON fw.id = t.from_warehouse_id
+       LEFT JOIN warehouses tw ON tw.id = t.to_warehouse_id
+       LEFT JOIN locations fl ON fl.id = t.from_location_id
+       LEFT JOIN locations tl ON tl.id = t.to_location_id
+       WHERE t.id = $1`,
+      [id]
+    );
+    
+    if (transferResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Transfer not found' });
+    }
+    
+    const transfer = transferResult.rows[0];
+    
+    // Get items with product details
+    const itemsResult = await pool.query(
+      `SELECT ti.id, ti.product_id as "productId", ti.quantity,
+              p.name as "productName", p.sku, p.uom
+       FROM transfer_items ti
+       JOIN products p ON p.id = ti.product_id
+       WHERE ti.transfer_id = $1`,
+      [id]
+    );
+    
+    res.json({
+      ...transfer,
+      items: itemsResult.rows,
+      date: transfer.date?.split('T')[0] || transfer.date
+    });
+  } catch (error) {
+    console.error('Error fetching transfer:', error);
+    res.status(500).json({ error: 'Failed to fetch transfer', message: error.message });
+  }
+});
+
+// POST /api/transfers - Create new transfer
+router.post('/transfers', async (req, res) => {
+  try {
+    const {
+      from_warehouse_id, to_warehouse_id, from_location_id, to_location_id,
+      date, items, notes
+    } = req.body;
+    
+    if (!from_warehouse_id || !to_warehouse_id || !date || !items || items.length === 0) {
+      return res.status(400).json({ error: 'Missing required fields: from_warehouse_id, to_warehouse_id, date, and items are required' });
+    }
+    
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Validate stock availability at source location for each item
+      for (const item of items) {
+        const availableStock = await getAvailableStock(client, parseInt(item.productId), from_location_id ? parseInt(from_location_id) : null);
+        if (item.quantity > availableStock) {
+          await client.query('ROLLBACK');
+          const productResult = await client.query('SELECT name, sku FROM products WHERE id = $1', [item.productId]);
+          return res.status(400).json({
+            error: 'Insufficient stock',
+            message: `Product ${productResult.rows[0]?.name || item.productId} has insufficient stock. Available: ${availableStock}, Requested: ${item.quantity}`,
+            productId: item.productId,
+            available: availableStock,
+            requested: item.quantity
+          });
+        }
+      }
+      
+      // Get next transfer number and generate reference
+      const countResult = await client.query('SELECT COUNT(*) as count FROM transfers');
+      const transferNumber = parseInt(countResult.rows[0].count) + 1;
+      const transferId = generateTransferReference(transferNumber);
+      
+      // Insert transfer
+      const transferResult = await client.query(
+        `INSERT INTO transfers (
+          transfer_id, from_warehouse_id, to_warehouse_id, from_location_id, to_location_id,
+          date, status, notes
+        )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, transfer_id as "transferId", date::text as date, status`,
+        [
+          transferId,
+          parseInt(from_warehouse_id),
+          parseInt(to_warehouse_id),
+          from_location_id ? parseInt(from_location_id) : null,
+          to_location_id ? parseInt(to_location_id) : null,
+          date,
+          'draft',
+          notes || null
+        ]
+      );
+      
+      const transfer = transferResult.rows[0];
+      
+      // Insert transfer items
+      for (const item of items) {
+        await client.query(
+          `INSERT INTO transfer_items (transfer_id, product_id, quantity)
+           VALUES ($1, $2, $3)`,
+          [transfer.id, item.productId, item.quantity]
+        );
+      }
+      
+      await client.query('COMMIT');
+      
+      // Fetch complete transfer
+      const completeResult = await client.query(
+        `SELECT t.*, 
+                fw.name as "fromWarehouse", tw.name as "toWarehouse",
+                fl.name as "fromLocation", tl.name as "toLocation"
+         FROM transfers t
+         LEFT JOIN warehouses fw ON fw.id = t.from_warehouse_id
+         LEFT JOIN warehouses tw ON tw.id = t.to_warehouse_id
+         LEFT JOIN locations fl ON fl.id = t.from_location_id
+         LEFT JOIN locations tl ON tl.id = t.to_location_id
+         WHERE t.id = $1`,
+        [transfer.id]
+      );
+      
+      const itemsResult = await client.query(
+        `SELECT ti.id, ti.product_id as "productId", ti.quantity,
+                p.name as "productName", p.sku, p.uom
+         FROM transfer_items ti
+         JOIN products p ON p.id = ti.product_id
+         WHERE ti.transfer_id = $1`,
+        [transfer.id]
+      );
+      
+      res.status(201).json({
+        success: true,
+        transfer: {
+          ...completeResult.rows[0],
+          items: itemsResult.rows,
+          date: completeResult.rows[0].date?.split('T')[0] || completeResult.rows[0].date
+        }
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Error creating transfer:', error);
+    res.status(500).json({ error: 'Failed to create transfer', message: error.message });
+  }
+});
+
+// PUT /api/transfers/:id - Update transfer (only when status is draft)
+router.put('/transfers/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      from_warehouse_id, to_warehouse_id, from_location_id, to_location_id,
+      date, items, notes
+    } = req.body;
+    
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Check if transfer exists and get current status
+      const currentResult = await client.query('SELECT status, from_location_id FROM transfers WHERE id = $1', [id]);
+      if (currentResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Transfer not found' });
+      }
+      
+      const currentStatus = currentResult.rows[0].status;
+      
+      // Only allow updates if status is draft
+      if (currentStatus !== 'draft') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Can only update transfers in draft status' });
+      }
+      
+      // Validate stock availability if items are being updated
+      if (items && items.length > 0) {
+        const locationId = from_location_id !== undefined ? from_location_id : currentResult.rows[0].from_location_id;
+        for (const item of items) {
+          const availableStock = await getAvailableStock(client, item.productId, locationId);
+          if (item.quantity > availableStock) {
+            await client.query('ROLLBACK');
+            const productResult = await client.query('SELECT name, sku FROM products WHERE id = $1', [item.productId]);
+            return res.status(400).json({
+              error: 'Insufficient stock',
+              message: `Product ${productResult.rows[0]?.name || item.productId} has insufficient stock. Available: ${availableStock}, Requested: ${item.quantity}`,
+              productId: item.productId,
+              available: availableStock,
+              requested: item.quantity
+            });
+          }
+        }
+      }
+      
+      // Update transfer
+      const transferResult = await client.query(
+        `UPDATE transfers 
+         SET from_warehouse_id = COALESCE($1, from_warehouse_id),
+             to_warehouse_id = COALESCE($2, to_warehouse_id),
+             from_location_id = COALESCE($3, from_location_id),
+             to_location_id = COALESCE($4, to_location_id),
+             date = COALESCE($5, date),
+             notes = COALESCE($6, notes)
+         WHERE id = $7
+         RETURNING id, transfer_id as "transferId", date::text as date, status`,
+        [from_warehouse_id, to_warehouse_id, from_location_id, to_location_id, date, notes, id]
+      );
+      
+      const transfer = transferResult.rows[0];
+      
+      // Update items if provided
+      if (items !== undefined) {
+        // Delete old items
+        await client.query('DELETE FROM transfer_items WHERE transfer_id = $1', [id]);
+        
+        // Insert new items
+        for (const item of items) {
+          await client.query(
+            `INSERT INTO transfer_items (transfer_id, product_id, quantity)
+             VALUES ($1, $2, $3)`,
+            [id, item.productId, item.quantity]
+          );
+        }
+      }
+      
+      await client.query('COMMIT');
+      
+      // Fetch complete transfer
+      const completeResult = await client.query(
+        `SELECT t.*, 
+                fw.name as "fromWarehouse", tw.name as "toWarehouse",
+                fl.name as "fromLocation", tl.name as "toLocation"
+         FROM transfers t
+         LEFT JOIN warehouses fw ON fw.id = t.from_warehouse_id
+         LEFT JOIN warehouses tw ON tw.id = t.to_warehouse_id
+         LEFT JOIN locations fl ON fl.id = t.from_location_id
+         LEFT JOIN locations tl ON tl.id = t.to_location_id
+         WHERE t.id = $1`,
+        [id]
+      );
+      
+      const itemsResult = await client.query(
+        `SELECT ti.id, ti.product_id as "productId", ti.quantity,
+                p.name as "productName", p.sku, p.uom
+         FROM transfer_items ti
+         JOIN products p ON p.id = ti.product_id
+         WHERE ti.transfer_id = $1`,
+        [id]
+      );
+      
+      res.json({
+        success: true,
+        transfer: {
+          ...completeResult.rows[0],
+          items: itemsResult.rows,
+          date: completeResult.rows[0].date?.split('T')[0] || completeResult.rows[0].date
+        }
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Error updating transfer:', error);
+    res.status(500).json({ error: 'Failed to update transfer', message: error.message });
+  }
+});
+
+// POST /api/transfers/:id/start - Move transfer to in_transit status
+router.post('/transfers/:id/start', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Get transfer
+      const transferResult = await client.query(
+        'SELECT status, from_location_id, from_warehouse_id FROM transfers WHERE id = $1',
+        [id]
+      );
+      
+      if (transferResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Transfer not found' });
+      }
+      
+      const transfer = transferResult.rows[0];
+      if (transfer.status !== 'draft') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Can only start draft transfers' });
+      }
+      
+      // Get items and check stock
+      const itemsResult = await client.query(
+        'SELECT product_id, quantity FROM transfer_items WHERE transfer_id = $1',
+        [id]
+      );
+      
+      if (itemsResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Transfer must have at least one item' });
+      }
+      
+      // Validate stock for each item
+      const stockErrors = [];
+      for (const item of itemsResult.rows) {
+        const available = await getAvailableStock(client, item.product_id, transfer.from_location_id);
+        if (item.quantity > available) {
+          const productResult = await client.query('SELECT name, sku FROM products WHERE id = $1', [item.product_id]);
+          stockErrors.push({
+            product: productResult.rows[0]?.name || 'Unknown',
+            sku: productResult.rows[0]?.sku || '',
+            requested: item.quantity,
+            available: available
+          });
+        }
+      }
+      
+      if (stockErrors.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: 'Insufficient stock for one or more items',
+          stockErrors
+        });
+      }
+      
+      // Update status to in_transit
+      await client.query('UPDATE transfers SET status = $1 WHERE id = $2', ['in_transit', id]);
+      
+      // Create stock move records (pending)
+      const transferRefResult = await client.query('SELECT transfer_id, date FROM transfers WHERE id = $1', [id]);
+      const transferRef = transferRefResult.rows[0];
+      
+      for (const item of itemsResult.rows) {
+        await client.query(
+          `INSERT INTO stock_moves (
+            reference, product_id, from_location_id, to_location_id, quantity, operation_type,
+            related_document_id, related_document_type, status, date
+          )
+          VALUES ($1, $2, $3, (SELECT to_location_id FROM transfers WHERE id = $4), $5, 'transfer', $4, 'transfer', 'pending', $6)`,
+          [transferRef.transfer_id, item.product_id, transfer.from_location_id, id, item.quantity, transferRef.date]
+        );
+      }
+      
+      await client.query('COMMIT');
+      
+      // Fetch updated transfer
+      const updatedResult = await client.query(
+        `SELECT t.*, 
+                fw.name as "fromWarehouse", tw.name as "toWarehouse",
+                fl.name as "fromLocation", tl.name as "toLocation"
+         FROM transfers t
+         LEFT JOIN warehouses fw ON fw.id = t.from_warehouse_id
+         LEFT JOIN warehouses tw ON tw.id = t.to_warehouse_id
+         LEFT JOIN locations fl ON fl.id = t.from_location_id
+         LEFT JOIN locations tl ON tl.id = t.to_location_id
+         WHERE t.id = $1`,
+        [id]
+      );
+      
+      res.json({
+        success: true,
+        transfer: {
+          ...updatedResult.rows[0],
+          date: updatedResult.rows[0].date?.split('T')[0] || updatedResult.rows[0].date
+        }
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Error starting transfer:', error);
+    res.status(500).json({ error: 'Failed to start transfer', message: error.message });
+  }
+});
+
+// POST /api/transfers/:id/complete - Complete transfer (in_transit → completed)
+router.post('/transfers/:id/complete', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Get transfer with warehouse and location info
+      const transferResult = await client.query(
+        `SELECT t.*, 
+                fw.name as "fromWarehouse", tw.name as "toWarehouse",
+                fl.name as "fromLocation", tl.name as "toLocation"
+         FROM transfers t
+         LEFT JOIN warehouses fw ON fw.id = t.from_warehouse_id
+         LEFT JOIN warehouses tw ON tw.id = t.to_warehouse_id
+         LEFT JOIN locations fl ON fl.id = t.from_location_id
+         LEFT JOIN locations tl ON tl.id = t.to_location_id
+         WHERE t.id = $1`,
+        [id]
+      );
+      
+      if (transferResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Transfer not found' });
+      }
+      
+      const transfer = transferResult.rows[0];
+      if (transfer.status !== 'in_transit') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Can only complete transfers in transit' });
+      }
+      
+      // Get items
+      const itemsResult = await client.query(
+        'SELECT product_id, quantity FROM transfer_items WHERE transfer_id = $1',
+        [id]
+      );
+      
+      if (itemsResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Transfer has no items' });
+      }
+      
+      // Process each item: decrease stock at source, increase at destination, create ledger entries
+      for (const item of itemsResult.rows) {
+        // Decrease stock at source location
+        if (transfer.from_location_id) {
+          // Get current balance at source
+          const sourceStockResult = await client.query(
+            `SELECT COALESCE(sl.quantity, p.stock, 0) as quantity
+             FROM products p
+             LEFT JOIN stock_levels sl ON sl.product_id = p.id 
+               AND sl.warehouse_id = $2 AND sl.location_id = $3
+             WHERE p.id = $1`,
+            [item.product_id, transfer.from_warehouse_id, transfer.from_location_id]
+          );
+          const balanceBeforeSource = parseFloat(sourceStockResult.rows[0]?.quantity || 0);
+          const balanceAfterSource = balanceBeforeSource - parseFloat(item.quantity);
+          
+          // Update stock_levels at source
+          await client.query(
+            `INSERT INTO stock_levels (product_id, warehouse_id, location_id, quantity)
+             VALUES ($1, $2, $3, -$4)
+             ON CONFLICT (product_id, warehouse_id, location_id)
+             DO UPDATE SET quantity = stock_levels.quantity - $4`,
+            [item.product_id, transfer.from_warehouse_id, transfer.from_location_id, item.quantity]
+          );
+          
+          // Create ledger entry for source (transfer_out)
+          await client.query(
+            `INSERT INTO stock_ledger (
+              product_id, warehouse_id, location_id, transaction_type,
+              reference_id, reference_type, quantity, balance_before, balance_after
+            )
+            VALUES ($1, $2, $3, 'transfer_out', $4, 'transfer', -$5, $6, $7)`,
+            [item.product_id, transfer.from_warehouse_id, transfer.from_location_id,
+             id, item.quantity, balanceBeforeSource, balanceAfterSource]
+          );
+        }
+        
+        // Increase stock at destination location
+        if (transfer.to_location_id) {
+          // Get current balance at destination
+          const destStockResult = await client.query(
+            `SELECT COALESCE(sl.quantity, p.stock, 0) as quantity
+             FROM products p
+             LEFT JOIN stock_levels sl ON sl.product_id = p.id 
+               AND sl.warehouse_id = $2 AND sl.location_id = $3
+             WHERE p.id = $1`,
+            [item.product_id, transfer.to_warehouse_id, transfer.to_location_id]
+          );
+          const balanceBeforeDest = parseFloat(destStockResult.rows[0]?.quantity || 0);
+          const balanceAfterDest = balanceBeforeDest + parseFloat(item.quantity);
+          
+          // Update stock_levels at destination
+          await client.query(
+            `INSERT INTO stock_levels (product_id, warehouse_id, location_id, quantity)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (product_id, warehouse_id, location_id)
+             DO UPDATE SET quantity = stock_levels.quantity + $4`,
+            [item.product_id, transfer.to_warehouse_id, transfer.to_location_id, item.quantity]
+          );
+          
+          // Create ledger entry for destination (transfer_in)
+          await client.query(
+            `INSERT INTO stock_ledger (
+              product_id, warehouse_id, location_id, transaction_type,
+              reference_id, reference_type, quantity, balance_before, balance_after
+            )
+            VALUES ($1, $2, $3, 'transfer_in', $4, 'transfer', $5, $6, $7)`,
+            [item.product_id, transfer.to_warehouse_id, transfer.to_location_id,
+             id, item.quantity, balanceBeforeDest, balanceAfterDest]
+          );
+        }
+      }
+      
+      // Update stock_moves status to done
+      await client.query(
+        'UPDATE stock_moves SET status = $1 WHERE related_document_id = $2 AND related_document_type = $3',
+        ['done', id, 'transfer']
+      );
+      
+      // Update transfer status to completed
+      await client.query('UPDATE transfers SET status = $1 WHERE id = $2', ['completed', id]);
+      
+      await client.query('COMMIT');
+      
+      // Fetch updated transfer
+      const updatedResult = await client.query(
+        `SELECT t.*, 
+                fw.name as "fromWarehouse", tw.name as "toWarehouse",
+                fl.name as "fromLocation", tl.name as "toLocation"
+         FROM transfers t
+         LEFT JOIN warehouses fw ON fw.id = t.from_warehouse_id
+         LEFT JOIN warehouses tw ON tw.id = t.to_warehouse_id
+         LEFT JOIN locations fl ON fl.id = t.from_location_id
+         LEFT JOIN locations tl ON tl.id = t.to_location_id
+         WHERE t.id = $1`,
+        [id]
+      );
+      
+      res.json({
+        success: true,
+        transfer: {
+          ...updatedResult.rows[0],
+          date: updatedResult.rows[0].date?.split('T')[0] || updatedResult.rows[0].date
+        }
+      });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Error completing transfer:', error);
+    res.status(500).json({ error: 'Failed to complete transfer', message: error.message });
+  }
+});
+
+// DELETE /api/transfers/:id - Cancel/delete transfer (only when status is draft)
+router.delete('/transfers/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const client = await pool.connect();
+    
+    try {
+      await client.query('BEGIN');
+      
+      // Check if transfer exists and get status
+      const transferResult = await client.query('SELECT status FROM transfers WHERE id = $1', [id]);
+      if (transferResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Transfer not found' });
+      }
+      
+      const status = transferResult.rows[0].status;
+      if (status !== 'draft') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Can only delete transfers in draft status' });
+      }
+      
+      // Delete transfer items (CASCADE will handle this, but explicit is clearer)
+      await client.query('DELETE FROM transfer_items WHERE transfer_id = $1', [id]);
+      
+      // Delete transfer
+      await client.query('DELETE FROM transfers WHERE id = $1', [id]);
+      
+      await client.query('COMMIT');
+      
+      res.json({ success: true, message: 'Transfer deleted successfully' });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (error) {
+    console.error('Error deleting transfer:', error);
+    res.status(500).json({ error: 'Failed to delete transfer', message: error.message });
+  }
+});
+
+// ============================================
+// MOVE HISTORY API
+// ============================================
+
+// GET /api/move-history - Fetch all stock movements from ledger
+router.get('/move-history', async (req, res) => {
+  try {
+    const { status, from_date, to_date, search, page = 1, limit = 50, sort_by = 'created_at', sort_order = 'desc' } = req.query;
+    const offset = (page - 1) * limit;
+    
+    // Validate sort_by to prevent SQL injection
+    const validSortFields = {
+      'created_at': 'sl.created_at',
+      'date': 'sl.created_at',
+      'reference': 'ref.reference',
+      'product': 'p.name'
+    };
+    
+    const sortField = validSortFields[sort_by] || 'sl.created_at';
+    const sortDirection = sort_order.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+    
+    let query = `
+      SELECT 
+        sl.id,
+        sl.transaction_type as "transactionType",
+        sl.quantity,
+        sl.balance_before as "balanceBefore",
+        sl.balance_after as "balanceAfter",
+        sl.created_at::text as date,
+        p.id as "productId",
+        p.name as "productName",
+        p.sku,
+        p.uom,
+        w.name as "warehouseName",
+        l.name as "locationName",
+        COALESCE(
+          d.reference,
+          r.receipt_id,
+          t.transfer_id,
+          'ADJ-' || a.adjustment_id
+        ) as reference,
+        COALESCE(
+          d.contact,
+          r.supplier,
+          NULL
+        ) as contact,
+        CASE 
+          WHEN sl.transaction_type IN ('receipt', 'transfer_in') THEN 'vendor'
+          WHEN sl.transaction_type = 'delivery' THEN COALESCE(fl.name, 'N/A')
+          WHEN sl.transaction_type = 'transfer_out' THEN COALESCE(fl.name, 'N/A')
+          ELSE 'N/A'
+        END as "fromLocation",
+        CASE 
+          WHEN sl.transaction_type IN ('delivery', 'transfer_out') THEN 'vendor'
+          WHEN sl.transaction_type = 'receipt' THEN COALESCE(l.name, 'N/A')
+          WHEN sl.transaction_type = 'transfer_in' THEN COALESCE(tl.name, 'N/A')
+          ELSE 'N/A'
+        END as "toLocation",
+        CASE 
+          WHEN sl.transaction_type IN ('receipt', 'transfer_in') THEN 'in'
+          WHEN sl.transaction_type IN ('delivery', 'transfer_out') THEN 'out'
+          ELSE 'adjustment'
+        END as direction
+      FROM stock_ledger sl
+      LEFT JOIN products p ON p.id = sl.product_id
+      LEFT JOIN warehouses w ON w.id = sl.warehouse_id
+      LEFT JOIN locations l ON l.id = sl.location_id
+      LEFT JOIN deliveries d ON d.id = sl.reference_id AND sl.reference_type = 'delivery'
+      LEFT JOIN receipts r ON r.id = sl.reference_id AND sl.reference_type = 'receipt'
+      LEFT JOIN transfers t ON t.id = sl.reference_id AND sl.reference_type = 'transfer'
+      LEFT JOIN adjustments a ON a.id = sl.reference_id AND sl.reference_type = 'adjustment'
+      LEFT JOIN locations fl ON (fl.id = d.from_location_id AND sl.reference_type = 'delivery') 
+                             OR (fl.id = t.from_location_id AND sl.reference_type = 'transfer')
+      LEFT JOIN locations tl ON tl.id = t.to_location_id AND sl.reference_type = 'transfer'
+      WHERE 1=1
+    `;
+    const params = [];
+    let paramCount = 0;
+    
+    if (status) {
+      paramCount++;
+      query += ` AND (CASE 
+        WHEN sl.transaction_type IN ('receipt', 'transfer_in') THEN 'in'
+        WHEN sl.transaction_type IN ('delivery', 'transfer_out') THEN 'out'
+        ELSE 'adjustment'
+      END) = $${paramCount}`;
+      params.push(status);
+    }
+    
+    if (from_date) {
+      paramCount++;
+      query += ` AND DATE(sl.created_at) >= $${paramCount}`;
+      params.push(from_date);
+    }
+    
+    if (to_date) {
+      paramCount++;
+      query += ` AND DATE(sl.created_at) <= $${paramCount}`;
+      params.push(to_date);
+    }
+    
+    if (search) {
+      paramCount++;
+      query += ` AND (
+        p.name ILIKE $${paramCount} OR 
+        p.sku ILIKE $${paramCount} OR
+        COALESCE(d.reference, r.receipt_id, t.transfer_id) ILIKE $${paramCount} OR
+        COALESCE(d.contact, r.supplier) ILIKE $${paramCount}
+      )`;
+      params.push(`%${search}%`);
+    }
+    
+    query += ` ORDER BY ${sortField} ${sortDirection} LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    params.push(limit, offset);
+    
+    const movementsResult = await pool.query(query, params);
+    
+    // Get total count
+    let countQuery = `
+      SELECT COUNT(*) as total
+      FROM stock_ledger sl
+      LEFT JOIN products p ON p.id = sl.product_id
+      LEFT JOIN deliveries d ON d.id = sl.reference_id AND sl.reference_type = 'delivery'
+      LEFT JOIN receipts r ON r.id = sl.reference_id AND sl.reference_type = 'receipt'
+      LEFT JOIN transfers t ON t.id = sl.reference_id AND sl.reference_type = 'transfer'
+      WHERE 1=1
+    `;
+    const countParams = [];
+    let countParamCount = 0;
+    
+    if (status) {
+      countParamCount++;
+      countQuery += ` AND (CASE 
+        WHEN sl.transaction_type IN ('receipt', 'transfer_in') THEN 'in'
+        WHEN sl.transaction_type IN ('delivery', 'transfer_out') THEN 'out'
+        ELSE 'adjustment'
+      END) = $${countParamCount}`;
+      countParams.push(status);
+    }
+    if (from_date) {
+      countParamCount++;
+      countQuery += ` AND DATE(sl.created_at) >= $${countParamCount}`;
+      countParams.push(from_date);
+    }
+    if (to_date) {
+      countParamCount++;
+      countQuery += ` AND DATE(sl.created_at) <= $${countParamCount}`;
+      countParams.push(to_date);
+    }
+    if (search) {
+      countParamCount++;
+      countQuery += ` AND (
+        p.name ILIKE $${countParamCount} OR 
+        p.sku ILIKE $${countParamCount} OR
+        COALESCE(d.reference, r.receipt_id, t.transfer_id) ILIKE $${countParamCount} OR
+        COALESCE(d.contact, r.supplier) ILIKE $${countParamCount}
+      )`;
+      countParams.push(`%${search}%`);
+    }
+    
+    const countResult = await pool.query(countQuery, countParams);
+    const total = parseInt(countResult.rows[0].total);
+    
+    // Format date for each movement
+    const movements = movementsResult.rows.map(movement => ({
+      ...movement,
+      date: movement.date?.split('T')[0] || movement.date
+    }));
+    
+    res.json({
+      movements,
+      total,
+      page: parseInt(page),
+      limit: parseInt(limit)
+    });
+  } catch (error) {
+    console.error('Error fetching move history:', error);
+    res.status(500).json({ error: 'Failed to fetch move history', message: error.message });
   }
 });
 

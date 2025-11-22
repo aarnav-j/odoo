@@ -222,9 +222,7 @@ export default function Login() {
       <div className="relative w-full max-w-md">
         <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md p-8">
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center h-12 w-12 rounded-md bg-gradient-to-br from-indigo-500 to-violet-500 text-white text-lg font-medium mb-4">
-              SM
-            </div>
+            <img src="/logo-2.jpg" alt="StockMaster Logo" className="h-12 w-12 object-contain mx-auto mb-4 rounded" />
             <h1 className="text-2xl font-semibold text-slate-50 mb-2">StockMaster</h1>
             <p className="text-sm text-slate-400">Sign in to your account</p>
           </div>

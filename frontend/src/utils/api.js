@@ -26,6 +26,20 @@ api.interceptors.response.use(
     return response;
   },
   (error) => {
+    // Handle 401 (Unauthorized) - clear auth and trigger logout
+    if (error.response && error.response.status === 401) {
+      // Don't clear auth for auth endpoints (login, signup) to avoid clearing during failed login attempts
+      const isAuthEndpoint = error.config?.url?.includes('/auth/');
+      if (!isAuthEndpoint) {
+        // Token is invalid/expired - clear auth
+        localStorage.removeItem('token');
+        localStorage.removeItem('user');
+        localStorage.removeItem('stockmaster_user');
+        // Dispatch event to notify AppContext to clear user state
+        window.dispatchEvent(new CustomEvent('auth:logout'));
+      }
+    }
+    
     // Log errors for debugging
     if (error.response) {
       // Server responded with error status
@@ -123,6 +137,17 @@ export async function deleteProduct(id) {
   return response.data;
 }
 
+// Locations & Warehouses API
+export async function fetchLocations() {
+  const response = await api.get('/locations');
+  return response.data;
+}
+
+export async function fetchWarehouses() {
+  const response = await api.get('/warehouses');
+  return response.data;
+}
+
 // Receipts API
 export async function fetchReceipts() {
   const response = await api.get('/receipts');
@@ -209,6 +234,70 @@ export async function processDelivery(id) {
 export async function fetchAvailableStock(locationId) {
   const query = locationId ? `?location_id=${locationId}` : '';
   const response = await api.get(`/products/available-stock${query}`);
+  return response.data;
+}
+
+// Transfers API
+export async function fetchTransfers(params = {}) {
+  const queryParams = new URLSearchParams();
+  if (params.status) queryParams.append('status', params.status);
+  if (params.from_date) queryParams.append('from_date', params.from_date);
+  if (params.to_date) queryParams.append('to_date', params.to_date);
+  if (params.search) queryParams.append('search', params.search);
+  if (params.page) queryParams.append('page', params.page);
+  if (params.limit) queryParams.append('limit', params.limit);
+  if (params.sort_by) queryParams.append('sort_by', params.sort_by);
+  if (params.sort_order) queryParams.append('sort_order', params.sort_order);
+  
+  const query = queryParams.toString();
+  const response = await api.get(`/transfers${query ? `?${query}` : ''}`);
+  return response.data;
+}
+
+export async function fetchTransferById(id) {
+  const response = await api.get(`/transfers/${id}`);
+  return response.data;
+}
+
+export async function createTransfer(transfer) {
+  const response = await api.post('/transfers', transfer);
+  return response.data;
+}
+
+export async function updateTransfer(id, transfer) {
+  const response = await api.put(`/transfers/${id}`, transfer);
+  return response.data;
+}
+
+export async function deleteTransfer(id) {
+  const response = await api.delete(`/transfers/${id}`);
+  return response.data;
+}
+
+export async function startTransfer(id) {
+  const response = await api.post(`/transfers/${id}/start`);
+  return response.data;
+}
+
+export async function completeTransfer(id) {
+  const response = await api.post(`/transfers/${id}/complete`);
+  return response.data;
+}
+
+// Move History API
+export async function fetchMoveHistory(params = {}) {
+  const queryParams = new URLSearchParams();
+  if (params.status) queryParams.append('status', params.status);
+  if (params.from_date) queryParams.append('from_date', params.from_date);
+  if (params.to_date) queryParams.append('to_date', params.to_date);
+  if (params.search) queryParams.append('search', params.search);
+  if (params.page) queryParams.append('page', params.page);
+  if (params.limit) queryParams.append('limit', params.limit);
+  if (params.sort_by) queryParams.append('sort_by', params.sort_by);
+  if (params.sort_order) queryParams.append('sort_order', params.sort_order);
+  
+  const query = queryParams.toString();
+  const response = await api.get(`/move-history${query ? `?${query}` : ''}`);
   return response.data;
 }
 

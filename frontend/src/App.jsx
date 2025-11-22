@@ -16,6 +16,7 @@ import Receipts from './pages/Receipts';
 import ReceiptsList from './pages/ReceiptsList';
 import ReceiptDetail from './pages/ReceiptDetail';
 import Deliveries from './pages/Deliveries';
+import Transfers from './pages/Transfers';
 import Toast from './components/ui/Toast';
 
 // Protected Route Component
@@ -77,7 +78,9 @@ function AppRoutes() {
           path="/stock"
           element={
             <ProtectedRoute>
-              <Stock />
+              <Layout>
+                <Stock />
+              </Layout>
             </ProtectedRoute>
           }
         />
@@ -85,7 +88,9 @@ function AppRoutes() {
           path="/operations"
           element={
             <ProtectedRoute>
-              <Operations />
+              <Layout>
+                <Operations />
+              </Layout>
             </ProtectedRoute>
           }
         />
@@ -147,6 +152,16 @@ function AppRoutes() {
             <ProtectedRoute>
               <Layout>
                 <Deliveries />
+              </Layout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/transfers/*"
+          element={
+            <ProtectedRoute>
+              <Layout>
+                <Transfers />
               </Layout>
             </ProtectedRoute>
           }

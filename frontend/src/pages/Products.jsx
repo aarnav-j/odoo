@@ -6,15 +6,17 @@ import StockCard from '../components/stock/StockCard';
 import EditStockModal from '../components/stock/EditStockModal';
 import AddProductModal from '../components/stock/AddProductModal';
 import RemoveStockModal from '../components/stock/RemoveStockModal';
+import InternalTransferModal from '../components/stock/InternalTransferModal';
 import Button from '../components/ui/Button';
-import { Plus, Minus } from 'lucide-react';
+import { Plus, Minus, ArrowRightLeft } from 'lucide-react';
 
 export default function Products() {
-  const { products, addProduct, updateStock, deleteProduct, showToast } = useApp();
+  const { products, addProduct, updateStock, deleteProduct, showToast, locations, warehouses, refreshProducts } = useApp();
   const [searchTerm, setSearchTerm] = useState('');
   const [isStockModalOpen, setIsStockModalOpen] = useState(false);
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [isRemoveStockModalOpen, setIsRemoveStockModalOpen] = useState(false);
+  const [isTransferModalOpen, setIsTransferModalOpen] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState(null);
 
   // Filter products based on search term
@@ -67,7 +69,7 @@ export default function Products() {
       </div>
 
       {/* Action Buttons */}
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Button
           variant="primary"
           onClick={() => setIsAddProductModalOpen(true)}
@@ -75,6 +77,14 @@ export default function Products() {
         >
           <Plus className="h-4 w-4" />
           Add Product
+        </Button>
+        <Button
+          variant="secondary"
+          onClick={() => setIsTransferModalOpen(true)}
+          className="gap-2"
+        >
+          <ArrowRightLeft className="h-4 w-4" />
+          Internal Transfer
         </Button>
         <Button
           variant="danger"
@@ -125,6 +135,16 @@ export default function Products() {
         onClose={() => setIsRemoveStockModalOpen(false)}
         products={products}
         onSave={handleRemoveStock}
+      />
+
+      {/* Internal Transfer Modal */}
+      <InternalTransferModal
+        isOpen={isTransferModalOpen}
+        onClose={() => setIsTransferModalOpen(false)}
+        locations={locations || []}
+        warehouses={warehouses || []}
+        showToast={showToast}
+        onTransferComplete={refreshProducts}
       />
     </div>
   );
