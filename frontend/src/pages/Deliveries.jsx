@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route } from 'react-router-dom';
 import DeliveryListView from '../components/delivery/DeliveryListView';
 import DeliveryForm from '../components/delivery/DeliveryForm';
 

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, Package, Download, Upload, User, LogOut, UserCircle, Menu, X } from 'lucide-react';
+import { NavLink, useLocation } from 'react-router-dom';
+import { LayoutDashboard, Package, Download, Upload, User, LogOut, UserCircle, Menu, X, Settings, ChevronDown, Warehouse, MapPin } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useNavigate } from 'react-router-dom';
 
@@ -11,17 +11,31 @@ const navItems = [
   { path: '/deliveries', label: 'Deliveries', icon: Upload },
 ];
 
+const settingsItems = [
+  { path: '/settings/warehouse', label: 'Warehouse', icon: Warehouse },
+  { path: '/settings/location', label: 'Locations', icon: MapPin },
+];
+
 export default function TopNav() {
   const [isOpen, setIsOpen] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const dropdownRef = useRef(null);
+  const settingsRef = useRef(null);
+  const location = useLocation();
   const { user, logout } = useApp();
   const navigate = useNavigate();
+
+  // Check if current route is a settings route
+  const isSettingsActive = location.pathname.startsWith('/settings');
 
   useEffect(() => {
     function handleClickOutside(event) {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
         setIsOpen(false);
+      }
+      if (settingsRef.current && !settingsRef.current.contains(event.target)) {
+        setIsSettingsOpen(false);
       }
     }
     document.addEventListener('mousedown', handleClickOutside);
@@ -67,6 +81,56 @@ export default function TopNav() {
                 </NavLink>
               );
             })}
+            
+            {/* Settings Dropdown */}
+            <div 
+              className="relative" 
+              ref={settingsRef}
+              onMouseEnter={() => setIsSettingsOpen(true)}
+              onMouseLeave={() => setIsSettingsOpen(false)}
+            >
+              <button
+                onClick={() => setIsSettingsOpen(!isSettingsOpen)}
+                className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium transition-colors ${
+                  isSettingsActive
+                    ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                    : 'text-slate-300 hover:bg-white/5 hover:text-slate-100'
+                }`}
+              >
+                <Settings className="h-4 w-4" />
+                Settings
+                <ChevronDown className={`h-3 w-3 transition-transform ${isSettingsOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {/* Dropdown Menu */}
+              {isSettingsOpen && (
+                <div
+                  className="absolute left-0 mt-0 w-48 rounded-lg border border-white/10 bg-slate-900 shadow-lg z-50"
+                >
+                  <div className="p-1">
+                    {settingsItems.map((item) => {
+                      const Icon = item.icon;
+                      const isActive = location.pathname === item.path;
+                      return (
+                        <NavLink
+                          key={item.path}
+                          to={item.path}
+                          onClick={() => setIsSettingsOpen(false)}
+                          className={`flex items-center gap-2 w-full rounded-md px-3 py-2 text-sm transition-colors ${
+                            isActive
+                              ? 'bg-indigo-500/20 text-indigo-300'
+                              : 'text-slate-300 hover:bg-white/5 hover:text-slate-100'
+                          }`}
+                        >
+                          <Icon className="h-4 w-4" />
+                          {item.label}
+                        </NavLink>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           </nav>
         </div>
 
@@ -141,6 +205,32 @@ export default function TopNav() {
                 </NavLink>
               );
             })}
+            
+            {/* Settings in Mobile Menu */}
+            <div className="pt-2 border-t border-white/10 mt-2">
+              <div className="px-3 py-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                Settings
+              </div>
+              {settingsItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = location.pathname === item.path;
+                return (
+                  <NavLink
+                    key={item.path}
+                    to={item.path}
+                    onClick={() => setMobileMenuOpen(false)}
+                    className={`flex items-center gap-3 rounded-md px-3 py-2.5 text-sm font-medium transition-colors ${
+                      isActive
+                        ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30'
+                        : 'text-slate-300 hover:bg-white/5 hover:text-slate-100'
+                    }`}
+                  >
+                    <Icon className="h-5 w-5" />
+                    {item.label}
+                  </NavLink>
+                );
+              })}
+            </div>
           </nav>
         </div>
       )}
